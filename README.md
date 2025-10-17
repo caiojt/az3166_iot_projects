@@ -94,7 +94,7 @@ The device publishes JSON payloads to the configured MQTT topic:
   "last_seen": 1234567890,
   "accel_x": 0.001,
   "accel_y": 0.002,
-  "accel_z": 1.000,
+  "accel_z": 1.0,
   "gyro_x": 0.1,
   "gyro_y": 0.2,
   "gyro_z": 0.3,
@@ -137,6 +137,7 @@ Adjust this value in the code if needed for your specific sensor.
 ## OLED Display
 
 The OLED shows:
+
 - **Line 0**: Device name or status
 - **Line 1**: Temperature and humidity
 - **Line 2**: Pressure or connection status
@@ -145,16 +146,19 @@ The OLED shows:
 ## Troubleshooting
 
 ### WiFi Connection Issues
+
 - Verify SSID and password via serial configuration
 - Check that 2.4GHz WiFi is available (AZ3166 doesn't support 5GHz)
 
 ### MQTT Connection Issues
+
 - Verify broker IP/hostname is correct
 - Check that broker port is accessible
 - Verify MQTT credentials if authentication is enabled
 - Update `connectMQTT()` function with your broker's username/password
 
 ### Serial Configuration Not Working
+
 - Ensure serial monitor baud rate is set to 115200
 - Press 'C' immediately after reset/power-on
 
@@ -171,7 +175,7 @@ mqtt:
       state_topic: "homeassistant/sensor/az3166/state"
       value_template: "{{ value_json.temperature }}"
       unit_of_measurement: "°C"
-    
+
     - name: "AZ3166 Humidity"
       state_topic: "homeassistant/sensor/az3166/state"
       value_template: "{{ value_json.humidity }}"

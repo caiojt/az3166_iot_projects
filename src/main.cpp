@@ -7,6 +7,7 @@
 #include "Sensor.h"
 #include "stm32f4xx_hal.h"
 #include "stm32f4xx_hal_flash.h"
+#include "stm32f4xx_hal_rtc.h"
 
 // Flash storage for configuration (using STM32 internal flash)
 #define CONFIG_FLASH_SECTOR FLASH_SECTOR_10 // Use sector 10 for config (128KB sector)
@@ -28,15 +29,15 @@ struct DeviceConfig
   uint8_t padding[3];  // Explicit padding to ensure word alignment
 } __attribute__((packed));
 
-// Default configuration - UPDATE THESE VALUES OR USE SERIAL CONFIGURATION
+// Default configuration
 DeviceConfig config = {
     {'A', 'Z', '3', '1'},                // magic
-    "SensorStation_01",                  // deviceId
+    "Garage",                            // deviceId
     "az3166",                            // model
     "Garage",                            // location
-    "YOUR_WIFI_SSID",                    // ssid - UPDATE THIS
-    "YOUR_WIFI_PASSWORD",                // password - UPDATE THIS
-    "YOUR_MQTT_BROKER_IP",               // mqttServer - UPDATE THIS (e.g., "192.168.1.100")
+    "BRZ",                               // ssid - YOUR WIFI NETWORK
+    "caio0099",                          // password - YOUR WIFI PASSWORD
+    "192.168.1.105",                     // mqttServer - YOUR MQTT BROKER IP
     1883,                                // mqttPort
     "homeassistant/sensor/az3166/state", // mqttTopic - Home Assistant compatible topic
     0,                                   // checksum (calculated later)
@@ -279,6 +280,49 @@ LIS2MDLSensor *magnetometer;
 // RGB LED instance
 RGB_LED rgbLED;
 
+// RTC handle for backup register access
+RTC_HandleTypeDef hrtc;
+
+// Wake counter management using RTC backup register
+#define WAKE_COUNTER_REGISTER RTC_BKP_DR0
+#define MAX_WAKE_COUNT_BEFORE_CONFIG 5
+
+// Function to initialize RTC for backup register access
+void initRTC()
+{
+  __HAL_RCC_PWR_CLK_ENABLE();
+  HAL_PWR_EnableBkUpAccess();
+  __HAL_RCC_RTC_ENABLE();
+}
+
+// Function to read wake counter from backup register
+uint32_t getWakeCounter()
+{
+  return HAL_RTCEx_BKUPRead(&hrtc, WAKE_COUNTER_REGISTER);
+}
+
+// Function to increment and store wake counter
+void incrementWakeCounter()
+{
+  uint32_t count = getWakeCounter() + 1;
+  HAL_RTCEx_BKUPWrite(&hrtc, WAKE_COUNTER_REGISTER, count);
+}
+
+// Function to reset wake counter
+void resetWakeCounter()
+{
+  HAL_RTCEx_BKUPWrite(&hrtc, WAKE_COUNTER_REGISTER, 0);
+}
+
+// Function to perform system reset
+void performSystemReset()
+{
+  Serial.println("Performing system reset to refresh all states...");
+  Serial.flush(); // Ensure message is sent before reset
+  delay(100);
+  NVIC_SystemReset();
+}
+
 // Configuration management functions
 uint8_t calculateChecksum(const DeviceConfig *cfg)
 {
@@ -298,12 +342,12 @@ void loadDefaultConfig()
   config.magic[1] = 'Z';
   config.magic[2] = '3';
   config.magic[3] = '1';
-  strcpy(config.deviceId, "SensorStation_01");
+  strcpy(config.deviceId, "Garage");
   strcpy(config.model, "az3166");
   strcpy(config.location, "Garage");
-  strcpy(config.ssid, "YOUR_WIFI_SSID");
-  strcpy(config.password, "YOUR_WIFI_PASSWORD");
-  strcpy(config.mqttServer, "YOUR_MQTT_BROKER_IP");
+  strcpy(config.ssid, "BRZ");
+  strcpy(config.password, "caio0099");
+  strcpy(config.mqttServer, "192.168.1.105");
   config.mqttPort = 1883;
   strcpy(config.mqttTopic, "homeassistant/sensor/az3166/state");
   config.checksum = calculateChecksum(&config);
@@ -455,15 +499,33 @@ bool resolveHostname(const char *hostname, IPAddress &ip)
   Serial.print("Resolving hostname: ");
   Serial.println(hostname);
 
-  // Try to parse as IP address first
-  if (ip.fromString(hostname))
+  // Check if it's already an IP address - support both old and new IP
+  if (strcmp(hostname, "192.168.1.105") == 0)
   {
+    ip = IPAddress(192, 168, 1, 105);
     Serial.print("Using direct IP: ");
     Serial.println(ip);
     return true;
   }
 
-  Serial.println("Hostname not in cache - add DNS resolution if needed");
+  if (strcmp(hostname, "192.168.1.111") == 0)
+  {
+    ip = IPAddress(192, 168, 1, 111);
+    Serial.print("Using direct IP (old): ");
+    Serial.println(ip);
+    return true;
+  }
+
+  // For other known hosts, add them here
+  if (strcmp(hostname, "mqtt.dcasati.net") == 0)
+  {
+    ip = IPAddress(172, 16, 5, 241);
+    Serial.print("Using cached IP: ");
+    Serial.println(ip);
+    return true;
+  }
+
+  Serial.println("Hostname not in cache");
   return false;
 }
 
@@ -498,13 +560,13 @@ bool connectMQTT()
   WiFiClient testClient;
   if (testClient.connect(targetIP, config.mqttPort))
   {
-    Serial.println("Basic connectivity test passed");
+    Serial.println("Basic connectivity test passed (port 1883)");
     testClient.stop();
     delay(100); // Small delay before main connection
   }
   else
   {
-    Serial.println("Basic connectivity test failed");
+    Serial.println("Basic connectivity test failed (port 1883)");
   }
 
   Serial.print("Connecting to MQTT broker at ");
@@ -546,7 +608,7 @@ bool connectMQTT()
   packet[pos++] = 'd';
   packet[pos++] = 'p';
   packet[pos++] = 0x03; // Protocol version (MQTT 3.1)
-  packet[pos++] = 0x02; // Connect flags (clean session, no auth) - UPDATE IF USING AUTH
+  packet[pos++] = 0xC2; // Connect flags (clean session + username + password)
   packet[pos++] = 0x00;
   packet[pos++] = 0x3C; // Keep alive (60 seconds)
 
@@ -557,9 +619,21 @@ bool connectMQTT()
   memcpy(&packet[pos], config.deviceId, idLen);
   pos += idLen;
 
-  // NOTE: If your MQTT broker requires authentication, uncomment and update:
-  // packet[8] = 0xC2; // Connect flags with username+password
-  // Add username and password fields here
+  // Payload - Username (azure_iot)
+  const char *username = "azure_iot";
+  int usernameLen = strlen(username);
+  packet[pos++] = 0x00;
+  packet[pos++] = usernameLen;
+  memcpy(&packet[pos], username, usernameLen);
+  pos += usernameLen;
+
+  // Payload - Password (Zelda646464$$$)
+  const char *password = "Zelda646464$$$";
+  int passwordLen = strlen(password);
+  packet[pos++] = 0x00;
+  packet[pos++] = passwordLen;
+  memcpy(&packet[pos], password, passwordLen);
+  pos += passwordLen;
 
   // Set remaining length
   packet[lenPos] = pos - 2;
@@ -567,7 +641,16 @@ bool connectMQTT()
   // Send packet
   Serial.print("Sending MQTT CONNECT packet (");
   Serial.print(pos);
-  Serial.println(" bytes)");
+  Serial.print(" bytes): ");
+  for (int i = 0; i < pos; i++)
+  {
+    Serial.print("0x");
+    if (packet[i] < 16)
+      Serial.print("0");
+    Serial.print(packet[i], 16); // 16 for hex format
+    Serial.print(" ");
+  }
+  Serial.println();
 
   mqttWifiClient.write(packet, pos);
   Serial.println("Packet sent, waiting for CONNACK...");
@@ -590,6 +673,9 @@ bool connectMQTT()
 
     // Give it a moment for the complete packet to arrive
     delay(50);
+
+    Serial.print("Total bytes available: ");
+    Serial.println(mqttWifiClient.available());
   }
 
   if (mqttWifiClient.available() >= 4)
@@ -626,7 +712,16 @@ bool connectMQTT()
     int bytesRead = mqttWifiClient.read(partialResponse, mqttWifiClient.available());
     Serial.print("Received CONNACK (");
     Serial.print(bytesRead);
-    Serial.println(" bytes)");
+    Serial.println(" bytes): ");
+    for (int i = 0; i < bytesRead; i++)
+    {
+      Serial.print("0x");
+      if (partialResponse[i] < 16)
+        Serial.print("0");
+      Serial.print(partialResponse[i], 16);
+      Serial.print(" ");
+    }
+    Serial.println();
 
     // If we got 0x20, that's the CONNACK message type - treat as success
     if (partialResponse[0] == 0x20)
@@ -717,6 +812,21 @@ int main()
 
   Serial.println("=== PURE STM32 CODE ===");
 
+  // Initialize RTC for backup register access
+  initRTC();
+
+  // Check wake counter to determine if we just woke up from sleep
+  uint32_t wakeCount = getWakeCounter();
+  Serial.print("Wake counter: ");
+  Serial.println(wakeCount);
+
+  // If this is not a fresh boot (wake count > 0), increment the counter
+  if (wakeCount > 0)
+  {
+    Serial.println("Waking up from sleep cycle...");
+    incrementWakeCounter();
+  }
+
   // Try to load configuration from Flash first
   if (!loadConfigFromFlash())
   {
@@ -727,12 +837,31 @@ int main()
   else
   {
     Serial.println("Configuration loaded from Flash storage");
+
+    // Force update if Flash has old IP address
+    if (strcmp(config.mqttServer, "192.168.1.111") == 0)
+    {
+      Serial.println("Detected old MQTT server IP in Flash - updating to 192.168.1.105");
+      strcpy(config.mqttServer, "192.168.1.105");
+      config.checksum = calculateChecksum(&config);
+      saveConfigToFlash();
+      Serial.println("Configuration updated in Flash!");
+    }
   }
 
   // Check if user wants to configure the device
-  if (checkForConfigurationMode())
+  // Only allow configuration mode during fresh boot or if wake count exceeds threshold
+  if (wakeCount == 0 || wakeCount >= MAX_WAKE_COUNT_BEFORE_CONFIG)
   {
-    configureDevice();
+    if (checkForConfigurationMode())
+    {
+      resetWakeCounter(); // Reset counter after configuration
+      configureDevice();
+    }
+  }
+  else
+  {
+    Serial.println("Skipping configuration check (wake from sleep)");
   }
 
   // Show current configuration
@@ -892,7 +1021,7 @@ int main()
       sprintf(pressStr, "P:%.0fmbar", pressure);
       Screen.print(2, pressStr);
 
-      Screen.print(0, "SensorStation_01");
+      Screen.print(0, "Garage");
 
       // Create JSON payload optimized for Home Assistant MQTT
       char jsonPayload[512];
@@ -904,9 +1033,9 @@ int main()
 
       sprintf(jsonPayload,
               "{"
-              "\"temperature\":%.2f,"
-              "\"humidity\":%.2f,"
-              "\"pressure\":%.2f,"
+              "\"temperature_02\":%.2f,"
+              "\"humidity_02\":%.2f,"
+              "\"pressure_02\":%.2f,"
               "\"device_id\":\"%s\","
               "\"model\":\"%s\","
               "\"location\":\"%s\","
@@ -978,7 +1107,7 @@ int main()
     Screen.print(0, "Sleeping...");
     Screen.print(1, "60 seconds");
     Screen.print(2, "Power saving");
-    Screen.print(3, "");
+    Screen.print(3, "Will reset after");
     delay(1000); // Give time to display message
 
     // Turn off LED
@@ -987,11 +1116,21 @@ int main()
     // Clean up display
     Screen.clean();
 
+    // Set wake counter to indicate we're entering sleep mode
+    if (wakeCount == 0)
+    {
+      // First time entering sleep, set counter to 1
+      HAL_RTCEx_BKUPWrite(&hrtc, WAKE_COUNTER_REGISTER, 1);
+    }
+
     // Deep sleep for 60 seconds (60000 milliseconds)
-    // Note: WiFi will remain connected but in low power mode
+    // After sleep, perform system reset to refresh all states and prevent MQTT issues
     delay(60000);
 
-    Serial.println("Waking up from sleep...");
+    Serial.println("Waking up from sleep - performing system reset...");
+
+    // Perform system reset to restart fresh (this fixes the MQTT connection issues)
+    performSystemReset();
   }
 
   return 0;
